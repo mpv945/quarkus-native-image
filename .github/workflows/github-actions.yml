@@ -1,0 +1,130 @@
+name: Java本地原生应用开发编译和部署
+run-name: ${{ github.actor }} GitHub Actions 🚀
+on:
+  push:
+    branches:
+      - main
+    #tags: [ 'v*.*.*' ]  # 如 v1.0.0 会触发构建
+permissions:
+  contents: write  # ✅ 关键点：授予 GITHUB_TOKEN 发布 release 的权限
+jobs:
+  init-job:
+    runs-on: ubuntu-latest
+    outputs:
+      build-time: ${{ steps.set.outputs.build-time }}
+      is_build: ${{ steps.build-flag.outputs.is_build }}
+    steps:
+      - id: set
+        run: echo "build-time=$(TZ='Asia/Shanghai' date +'%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: get commit msg
+        id: get-msg
+        if: github.event_name == 'push'
+        run: |
+          commit_body=$(git log -1 --pretty=format:"%s%n%n%b")
+          echo $commit_body
+          if [[ "$commit_body" =~ "发布生产" ]]; then
+            echo '包含: if echo "$string1" | grep -q "$string2"; then'
+            # exit 0
+            echo "is_build_tmp=true" >> $GITHUB_OUTPUT
+          else
+            echo "不包含"
+            # exit 1
+            echo "is_build_tmp=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Step 2 (fallback setter)
+        id: build-flag
+        run: |
+          echo "is_build=${{ steps.get-msg.outputs.is_build_tmp || 'true' }}" >> $GITHUB_OUTPUT
+  build-matrix-os:
+    needs: init-job
+    runs-on: ${{ matrix.os }} # 系统os选择：https://github.com/actions/runner-images?tab=readme-ov-file
+    if: ${{ needs.init-job.outputs.is_build == 'true' }}
+    env:
+      BUILD_DATETIME: ${{ needs.init-job.outputs.build-time }}
+    outputs: # 二次传递跨job
+      build-time: ${{ needs.init-job.outputs.build-time }}
+    strategy:
+      matrix:
+        # platform: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest] # 苹果arm收费：macos-15-xlarge,
+        java: [24]
+    name: Build native image for ${{ matrix.os }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Java ${{ matrix.os }}
+        uses: actions/setup-java@v4 # https://github.com/actions/setup-java
+        with:
+          distribution: 'graalvm' # See 'Supported distributions' for available options
+          java-version: ${{ matrix.java }}
+          # check-latest: true
+          cache: "maven"
+          cache-dependency-path: 'pom.xml'
+      - name: Extract Project Name and Version ${{ matrix.os }}
+        shell: bash
+        run: |
+          ARTIFACT_ID=$(mvn help:evaluate -q -DforceStdout -Dexpression=project.artifactId)
+          VERSION=$(mvn help:evaluate -q -DforceStdout -Dexpression=project.version)
+          echo "ARTIFACT_ID=$ARTIFACT_ID" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+      - name: Normalize OS Name ${{ matrix.os }}
+        shell: bash
+        run: |
+          OS_NAME=$(java -XshowSettings:properties -version 2>&1 | grep "os.name" | awk -F' = ' '{print $2}' | tr '[:upper:]' '[:lower:]' | sed 's/ //g')
+          if [[ "$OS_NAME" =~ windows ]]; then
+            OS_CLASSIFIER="windows"
+          elif [[ "$OS_NAME" =~ macos|darwin ]]; then
+            OS_CLASSIFIER="macos"
+          else
+            OS_CLASSIFIER="linux"
+          fi
+          echo "OS_CLASSIFIER=$OS_CLASSIFIER" >> $GITHUB_ENV
+          OS_ARCH=$(java -XshowSettings:properties -version 2>&1 | grep "os.arch" | awk -F' = ' '{print $2}')
+          echo "OS_ARCH=$OS_ARCH" >> $GITHUB_ENV
+      - name: Print Java Info ${{ matrix.os }}
+        shell: bash
+        run: |
+          java -version
+          mvn --version
+          mvn -Dspring-boot.build-image.imageName=${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }} -DfinalName=${{ env.ARTIFACT_ID }}-${{ env.VERSION }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }} -Dnative.imageName=${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }} install -Dnative -DskipTests
+          ls -alh target/
+          echo ${{ env.ARTIFACT_ID }}-${{ env.VERSION }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}
+          if [[ ! "$OS_NAME" =~ windows ]]; then
+            chmod +x target/${{ env.ARTIFACT_ID }}
+          fi
+          mkdir artifact
+          cp target/${{ env.ARTIFACT_ID }}${{ matrix.os == 'windows-latest' && '.exe' || '' }} artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          cp target/${{ env.ARTIFACT_ID }}-${{ env.VERSION }}.jar artifact/${{ env.ARTIFACT_ID }}-${{ env.VERSION }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}.jar
+          ls -lah artifact/
+      - name: install upx ${{ matrix.os }}
+        #if: "!contains(matrix.os, windows)"
+        shell: bash
+        # shell: ${{ matrix.os == 'windows-latest' && 'cmd' || 'bash' }}
+        run: |
+          ls -lah artifact/
+          if [[ "${{ matrix.os }}" =~ windows ]]; then
+            echo "choco install maven -y"
+            choco install upx -y
+            upx --best --lzma artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+            # upx --ultra-brute --lzma --all-methods --all-filters artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}${{ matrix.os == 'windows-latest' && '.exe' || '' }} -o  artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}-mini${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          elif [[ "${{ matrix.os }}" =~ macos ]]; then
+            echo "brew install maven"
+            # brew install upx （Apple 的 代码签名机制 与 可执行文件结构 不兼容 UPX 的修改。）
+            # upx --best --lzma --all-filters artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}
+          else
+            echo "apt install -y maven"
+            sudo apt update && sudo apt install -y xz-utils upx
+            upx --best --lzma --all-filters artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}
+            docker build -f Dockerfile --build-arg APP_FILE=./artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }} -t "${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}:$BUILD_DATETIME" .
+            # 常用压缩：xz -T0 -z；导入：xz -dc < ubuntu_latest.tar.xz | docker load 或 docker save -o fedora-latest.tar fedora:latest
+            # docker save "${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}:$BUILD_DATETIME" | xz -T0 -9e -zc - > "artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}_$BUILD_DATETIME.tar.xz"
+            docker save "${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}:$BUILD_DATETIME" | gzip > "artifact/${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}_$BUILD_DATETIME.tar.gz"
+          fi
+          ls -lah artifact/
+      - name: Upload Native Executable ${{ matrix.os }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ env.ARTIFACT_ID }}-${{ env.OS_CLASSIFIER }}-${{ env.OS_ARCH }}
+          path: artifact/*
