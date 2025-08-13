@@ -46,10 +46,10 @@
             <artifactId>quarkus-poi</artifactId>
             <version>2.1.2</version>
         </dependency>
-        <!--<dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-awt</artifactId>
-        </dependency>-->
+        </dependency>
 
         <dependency>
             <groupId>io.quarkus</groupId>
