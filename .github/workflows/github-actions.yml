@@ -40,7 +40,7 @@ jobs:
   build-matrix-os:
     needs: init-job
     runs-on: ${{ matrix.os }} # 系统os选择：https://github.com/actions/runner-images?tab=readme-ov-file
-    if: ${{ needs.init-job.outputs.is_build == 'true' }}
+    # if: ${{ needs.init-job.outputs.is_build == 'true' }}
     env:
       BUILD_DATETIME: ${{ needs.init-job.outputs.build-time }}
     outputs: # 二次传递跨job
